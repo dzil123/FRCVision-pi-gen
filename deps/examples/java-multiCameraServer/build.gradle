@@ -1,32 +1,93 @@
 plugins {
     id 'java'
     id 'application'
-    id 'com.github.johnrengelman.shadow' version '4.0.3' apply false
+    id 'edu.wpi.first.GradleRIO' version "2019.4.1"
 }
 
-mainClassName = 'Main'
-
-apply plugin: 'com.github.johnrengelman.shadow'
+mainClassName = 'Main' // Replace this with your own class and package
 
 repositories {
     mavenCentral()
-    flatDir {
-        dirs '/usr/local/frc/java', '.'
-    }
 }
 
 dependencies {
     compile 'com.google.code.gson:gson:2.8.5'
 
-    compile name: 'wpiutil'
-    compile name: 'ntcore'
-    compile name: 'cscore'
-    compile name: 'cameraserver'
-    compile name: 'opencv-344'
-    compile name: 'wpilibj'
-    compile name: 'wpiHal'
+    compile wpi.deps.wpilib()
+    compile wpi.deps.vendor.java()
+    nativeZip wpi.deps.vendor.jni(wpi.platforms.raspbian)
 }
 
 wrapper {
     gradleVersion = '5.0'
+}
+
+jar {
+    // Add all dependencies to a single .jar
+    from { configurations.compile.collect { it.isDirectory() ? it : zipTree(it) } }
+    
+    // Define main class to run
+    manifest { attributes( 'Main-Class': mainClassName ) }
+}
+
+// Disable deploying libraries that are already included on the WPILib FRCVision Pi image
+afterEvaluate { project -> 
+    project.tasks.deployJreRpi { onlyIf { return false } }
+    project.tasks.deployNativeLibsRpi { onlyIf { return false } }
+    project.tasks.deployNativeZipRpi { onlyIf { return false } }
+    project.tasks.deployRoborioCommandsRpi { onlyIf { return false } }
+}
+
+deploy {
+    targets {
+        target('rpi') {
+            directory = '/home/pi'
+            failOnMissing = true // Fail with an error if cannot connect
+            timeout = 5          // Will search for pi maximum 5 seconds
+            
+            locations {
+                ssh {
+                    address = 'frcvision.local' // Default mDNS address. You can replace with static IP
+                    user = 'pi'                 // Default username and password
+                    password = 'raspberry'
+                }
+            }
+        }
+    }
+    
+    artifacts {
+        all {
+            directory = '.' // Work in /home/pi
+            targets << 'rpi'
+        }
+        
+        javaArtifact('combinedJar') {
+            filename = 'uploaded.jar' // Rename file to uploaded.jar for compatibility with web interface
+            
+            // Mount filesystems read/write before upload
+            predeploy << { execute '/usr/bin/sudo /bin/mount -o remount,rw /' }
+            predeploy << { execute '/usr/bin/sudo /bin/mount -o remount,rw /boot' } 
+        }
+        
+        fileArtifact('runCamera') {
+            file = file('runCamera')   // The default runCamera for uploaded jars from the web interface
+            filename = 'runCamera.tmp' // Will be renamed later
+            
+            dependsOn('deployCombinedJarRpi')
+            
+            postdeploy << { execute '/usr/bin/sudo /bin/chown 1000:1000 ./runCamera.tmp'}
+            postdeploy << { execute 'tr -d \'\\r\' < "runCamera.tmp" | tee "runCamera"'}  // Fix newlines
+            postdeploy << { execute '/usr/bin/sudo /bin/chown 1000:1000 ./runCamera'}
+            postdeploy << { execute '/usr/bin/sudo /bin/chmod +x ./runCamera'}            // Make executable
+            postdeploy << { execute '/usr/bin/sudo /bin/rm -fdr ./runCamera.tmp'}         // Delete temp file
+            
+            postdeploy << { execute '/usr/bin/sudo /usr/bin/killall java'}                // Kill existing program
+            postdeploy << { execute '/usr/bin/sudo /usr/bin/killall -9 java'}
+            postdeploy << { execute '/usr/bin/sudo /bin/bash ./runService'}               // Run new program
+            
+            // Mount filesystems readonly for safe shutdown
+            postdeploy << { execute '/usr/bin/sudo /bin/mount -o remount,ro / ' }
+            postdeploy << { execute '/usr/bin/sudo /bin/mount -o remount,ro /boot ' }
+        }
+    }
 }
